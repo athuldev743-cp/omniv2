@@ -42,6 +42,7 @@ const pool = new Pool({
     ca: process.env.AIVEN_CA_CERT,  // ← env var instead of file
   },
 });
+const PORT = process.env.PORT || 3001;
 
 // ─── Per-user in-memory state ─────────────────────────────────────────────────
 // userId (email) → { sock, qr, connected, reconnectAttempts, idleTimer }
