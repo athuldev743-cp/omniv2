@@ -386,6 +386,21 @@ app.post("/logout", requireUser, async (req, res) => {
   }
 });
 
+async function relaunchExistingSessions() {
+  try {
+    const result = await pool.query(
+      "SELECT DISTINCT user_id FROM wa_auth_state WHERE key = 'creds'"
+    )
+    for (const row of result.rows) {
+      console.log(`[Startup] Relaunching session for ${row.user_id}`)
+      launchSocket(row.user_id).catch(console.error)
+    }
+  } catch (e) {
+    console.error('[Startup] Failed to relaunch sessions:', e.message)
+  }
+}
+
+
 // Health check (no user needed)
 app.get("/health", (req, res) => {
   res.json({
@@ -402,17 +417,4 @@ app.listen(PORT, () => {
 });
 
 // Add this at the bottom of index.js, after app.listen
-async function relaunchExistingSessions() {
-  try {
-    const result = await pool.query(
-      "SELECT DISTINCT user_id FROM wa_auth_state WHERE key = 'creds'"
-    )
-    for (const row of result.rows) {
-      console.log(`[Startup] Relaunching session for ${row.user_id}`)
-      launchSocket(row.user_id).catch(console.error)
-    }
-  } catch (e) {
-    console.error('[Startup] Failed to relaunch sessions:', e.message)
-  }
-}
 
