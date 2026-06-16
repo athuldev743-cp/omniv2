@@ -51,6 +51,22 @@ const sessions = new Map();
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // drop socket after 30 min idle (no sends)
 const MAX_RECONNECTS  = 5;
 
+
+async function updateDatabaseStatus(userId, status) {
+    try {
+        await fetch(`${process.env.BACKEND_API_URL}/profile/update-status`, {
+            method: 'PATCH',
+            headers: { 
+                'Content-Type': 'application/json',
+                'X-User-Email': userId 
+            },
+            body: JSON.stringify({ whatsapp_status: status })
+        });
+    } catch (err) {
+        console.error(`[Sync] Failed to update DB for ${userId}:`, err);
+    }
+}
+
 // ─── Auth State (namespaced by userId) ───────────────────────────────────────
 async function useAuthState(userId) {
   const ns = userId.toLowerCase().trim(); // use email as namespace
@@ -207,6 +223,13 @@ s.sock = makeWASocket({
       s.reconnectAttempts = 0;
       resetIdleTimer(userId);
       console.log(`✅ [Socket:${userId}] Connected`);
+      
+      // ✅ SYNC TO DATABASE: Status is now LIVE
+      await fetch(`${process.env.BACKEND_API_URL}/whatsapp/update-status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-User-Email': userId },
+          body: JSON.stringify({ status: 'connected' })
+      }).catch(e => console.error(`[Sync] Failed to set connected: ${e.message}`));
     }
 
     if (connection === "close") {
@@ -214,7 +237,16 @@ s.sock = makeWASocket({
       s.qr = null;
       s.sock = null;
 
+      // ✅ SYNC TO DATABASE: Status is now DISCONNECTED
+      await fetch(`${process.env.BACKEND_API_URL}/whatsapp/update-status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-User-Email': userId },
+          body: JSON.stringify({ status: 'disconnected' })
+      }).catch(e => console.error(`[Sync] Failed to set disconnected: ${e.message}`));
+
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      // ... rest of your disconnect logic
+    
       console.log(`[Socket:${userId}] Closed. Code: ${code}`);
 
       if (code === DisconnectReason.loggedOut) {
