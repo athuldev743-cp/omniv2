@@ -378,6 +378,73 @@ app.post("/connections/:connId/send", requireUser, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Add these two routes to index.js, right after /connections/:connId/send ──
+
+function b64ToBuffer(dataOrB64) {
+  const clean = String(dataOrB64).includes(",") ? dataOrB64.split(",")[1] : dataOrB64;
+  return Buffer.from(clean, "base64");
+}
+
+app.post("/connections/:connId/send-image", requireUser, async (req, res) => {
+  const s = getSession(req.userId, req.params.connId);
+  if (!s.connected || !s.sock) return res.status(503).json({ error: "not_connected" });
+  const { phone, image_base64, caption } = req.body;
+  if (!phone || !image_base64) return res.status(400).json({ error: "phone_and_image_required" });
+  try {
+    resetIdleTimer(req.userId, req.params.connId);
+    const result = await s.sock.sendMessage(toJID(phone), {
+      image: b64ToBuffer(image_base64),
+      caption: caption || "",
+    });
+    res.json({ success: true, messageId: result.key.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/connections/:connId/send-bulk-media", requireUser, async (req, res) => {
+  const s = getSession(req.userId, req.params.connId);
+  if (!s.connected || !s.sock) return res.status(503).json({ error: "not_connected" });
+  const { phone, text_message, photos_array = [], pdfs_array = [], audio_voice_base64 } = req.body;
+  if (!phone) return res.status(400).json({ error: "phone_required" });
+
+  try {
+    resetIdleTimer(req.userId, req.params.connId);
+    const jid = toJID(phone);
+    let lastId = null;
+
+    if (text_message) {
+      const r = await s.sock.sendMessage(jid, { text: text_message });
+      lastId = r.key.id;
+      await sleep(800);
+    }
+    for (const photoSrc of photos_array) {
+      const buf = photoSrc.startsWith("http")
+        ? Buffer.from((await (await fetch(photoSrc)).arrayBuffer()))
+        : b64ToBuffer(photoSrc);
+      const r = await s.sock.sendMessage(jid, { image: buf });
+      lastId = r.key.id;
+      await sleep(800);
+    }
+    for (const pdfSrc of pdfs_array) {
+      const buf = pdfSrc.startsWith("http")
+        ? Buffer.from((await (await fetch(pdfSrc)).arrayBuffer()))
+        : b64ToBuffer(pdfSrc);
+      const r = await s.sock.sendMessage(jid, { document: buf, mimetype: "application/pdf", fileName: "document.pdf" });
+      lastId = r.key.id;
+      await sleep(800);
+    }
+    if (audio_voice_base64) {
+      const r = await s.sock.sendMessage(jid, { audio: b64ToBuffer(audio_voice_base64), mimetype: "audio/mp4", ptt: true });
+      lastId = r.key.id;
+    }
+
+    res.json({ success: true, messageId: lastId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // (repeat the same pattern for /connections/:connId/send-image and /connections/:connId/send-bulk-media,
 //  identical bodies to your current /send-image and /send-bulk-media, just reading req.params.connId
 //  and calling getSession(req.userId, req.params.connId) instead of getSession(req.userId))
