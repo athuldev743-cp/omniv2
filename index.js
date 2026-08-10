@@ -454,30 +454,23 @@ async function launchSocket(userId) {
         // DISCONNECTED
         // ───────────────────────────────────────────────────────────────
 
-        if (connection === "close") {
-          s.connected = false;
-          s.qr = null;
-          s.sock = null;
-          s.launching = false;
+       if (connection === "close") {
+  s.connected = false;
+  s.qr = null;
+  s.sock = null;
+  s.launching = false;
 
-          if (s.idleTimer) {
-            clearTimeout(s.idleTimer);
-            s.idleTimer = null;
-          }
+  const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+  console.log(`[Socket:${userId}] Closed. Code: ${code}`);
 
-          await updateDatabaseStatus(
-            userId,
-            "disconnected"
-          );
-
-          const code =
-            new Boom(
-              lastDisconnect?.error
-            )?.output?.statusCode;
-
-          console.log(
-            `[Socket:${userId}] Closed. Code: ${code}`
-          );
+  // 428 or Connection Closed -> Re-trigger socket launch directly
+  if (code === 428 || code === DisconnectReason.connectionClosed) {
+    console.log(`[Socket:${userId}] Precondition/Connection close (428) — restarting socket...`);
+    setTimeout(() => {
+      launchSocket(userId).catch(console.error);
+    }, 2000);
+    return;
+  }
 
           // ───────────────────────────────────────────────────────────
           // LOGGED OUT
