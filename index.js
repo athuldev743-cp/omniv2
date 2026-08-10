@@ -226,53 +226,56 @@ async function launchSocket(userId, connId, { usePairingCode = false, phoneNumbe
       }
     }
 
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+sock.ev.on("connection.update", async (update) => {
+  try {
+    const { connection, lastDisconnect, qr } = update;
 
-      if (qr && !usePairingCode) {
-        if (s.qr !== qr) {
-          try {
-            const dataUrl = await QRCode.toDataURL(qr);
-            s.qr = dataUrl.split(",")[1];
-          } catch (e) { console.error(`[Socket:${userId}:${connId}] QR gen error:`, e.message); }
-        }
+    if (qr && !usePairingCode) {
+      if (s.qr !== qr) {
+        try {
+          const dataUrl = await QRCode.toDataURL(qr);
+          s.qr = dataUrl.split(",")[1];
+        } catch (e) { console.error(`[Socket:${userId}:${connId}] QR gen error:`, e.message); }
       }
+    }
 
-      if (connection === "open") {
-        s.connected = true; s.qr = null; s.pairingCode = null; s.reconnectAttempts = 0; s.launching = false;
-        resetIdleTimer(userId, connId);
-        const phone = sock.user?.id?.split(":")[0] || phoneNumber || "";
-        await upsertConnectionRecord(userId, connId, { phone_number: phone, status: "connected" });
-        await updateDatabaseStatus(userId, "connected");
-        console.log(`✅ [Socket:${userId}:${connId}] Connected as ${phone}`);
+    if (connection === "open") {
+      s.connected = true; s.qr = null; s.pairingCode = null; s.reconnectAttempts = 0; s.launching = false;
+      resetIdleTimer(userId, connId);
+      const phone = sock.user?.id?.split(":")[0] || phoneNumber || "";
+      await upsertConnectionRecord(userId, connId, { phone_number: phone, status: "connected" });
+      console.log(`✅ [Socket:${userId}:${connId}] Connected as ${phone}`);
+    }
+
+    if (connection === "close") {
+      s.connected = false; s.qr = null; s.sock = null; s.launching = false;
+      const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      await upsertConnectionRecord(userId, connId, { status: "disconnected" });
+
+      if (code === 428 || code === DisconnectReason.connectionClosed) {
+        setTimeout(() => launchSocket(userId, connId).catch(console.error), 2000);
+        return;
       }
-
-      if (connection === "close") {
-        s.connected = false; s.qr = null; s.sock = null; s.launching = false;
-        const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        await upsertConnectionRecord(userId, connId, { status: "disconnected" });
-
-        if (code === 428 || code === DisconnectReason.connectionClosed) {
-          setTimeout(() => launchSocket(userId, connId).catch(console.error), 2000);
-          return;
-        }
-        if (code === DisconnectReason.loggedOut) {
-          await clearAuthForConnection(userId, connId);
-          s.reconnectAttempts = 0;
-          return; // don't auto-relaunch a logged-out connection
-        }
-        if (code === 440) { setTimeout(() => launchSocket(userId, connId).catch(console.error), 15000); return; }
-        if (code === 515) { setTimeout(() => launchSocket(userId, connId).catch(console.error), 2000); return; }
-
-        s.reconnectAttempts++;
-        if (s.reconnectAttempts >= MAX_RECONNECTS) {
-          s.reconnectAttempts = 0;
-          setTimeout(() => launchSocket(userId, connId).catch(console.error), 60000);
-          return;
-        }
-        setTimeout(() => launchSocket(userId, connId).catch(console.error), Math.min(s.reconnectAttempts * 5000, 30000));
+      if (code === DisconnectReason.loggedOut) {
+        await clearAuthForConnection(userId, connId);
+        s.reconnectAttempts = 0;
+        return;
       }
-    });
+      if (code === 440) { setTimeout(() => launchSocket(userId, connId).catch(console.error), 15000); return; }
+      if (code === 515) { setTimeout(() => launchSocket(userId, connId).catch(console.error), 2000); return; }
+
+      s.reconnectAttempts++;
+      if (s.reconnectAttempts >= MAX_RECONNECTS) {
+        s.reconnectAttempts = 0;
+        setTimeout(() => launchSocket(userId, connId).catch(console.error), 60000);
+        return;
+      }
+      setTimeout(() => launchSocket(userId, connId).catch(console.error), Math.min(s.reconnectAttempts * 5000, 30000));
+    }
+  } catch (err) {
+    console.error(`[Socket:${userId}:${connId}] connection.update handler error:`, err);
+  }
+});
 
     sock.ev.on("creds.update", saveCreds);
   } catch (err) {
