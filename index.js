@@ -409,47 +409,73 @@ app.post("/connections/:connId/send-bulk-media", requireUser, async (req, res) =
   const { phone, text_message, photos_array = [], pdfs_array = [], audio_voice_base64 } = req.body;
   if (!phone) return res.status(400).json({ error: "phone_required" });
 
- try {
-    resetIdleTimer(req.userId, req.params.connId);
-    const jid = toJID(phone);
-    let lastId = null;
-    let captionUsed = false;
+  resetIdleTimer(req.userId, req.params.connId);
+  const jid = toJID(phone);
+  let lastId = null;
+  let captionUsed = false;
+  const errors = [];
 
-    // Attach text_message as the CAPTION of the first photo (WhatsApp-native style)
-    // instead of sending it as a separate message before the image.
-    for (let i = 0; i < photos_array.length; i++) {
+  console.log(`[send-bulk-media] photos=${photos_array.length} pdfs=${pdfs_array.length} hasAudio=${!!audio_voice_base64} hasText=${!!text_message}`);
+
+  for (let i = 0; i < photos_array.length; i++) {
+    try {
       const photoSrc = photos_array[i];
       const buf = photoSrc.startsWith("http")
         ? Buffer.from((await (await fetch(photoSrc)).arrayBuffer()))
         : b64ToBuffer(photoSrc);
       const isFirst = i === 0;
       const msg = { image: buf };
-      if (isFirst && text_message) {
-        msg.caption = text_message;
-        captionUsed = true;
-      }
+      if (isFirst && text_message) { msg.caption = text_message; captionUsed = true; }
       const r = await s.sock.sendMessage(jid, msg);
       lastId = r.key.id;
       await sleep(800);
+    } catch (e) {
+      console.error(`[send-bulk-media] photo ${i} failed:`, e.message);
+      errors.push(`photo${i}: ${e.message}`);
     }
+  }
 
-    // Only send text as a standalone message if there was no photo to attach it to
-    if (text_message && !captionUsed) {
+  if (text_message && !captionUsed) {
+    try {
       const r = await s.sock.sendMessage(jid, { text: text_message });
       lastId = r.key.id;
       await sleep(800);
+    } catch (e) {
+      console.error(`[send-bulk-media] text failed:`, e.message);
+      errors.push(`text: ${e.message}`);
     }
-    if (audio_voice_base64) {
+  }
+
+  for (let i = 0; i < pdfs_array.length; i++) {
+    try {
+      const pdfSrc = pdfs_array[i];
+      const buf = pdfSrc.startsWith("http")
+        ? Buffer.from((await (await fetch(pdfSrc)).arrayBuffer()))
+        : b64ToBuffer(pdfSrc);
+      const r = await s.sock.sendMessage(jid, { document: buf, mimetype: "application/pdf", fileName: `document${i + 1}.pdf` });
+      lastId = r.key.id;
+      await sleep(800);
+    } catch (e) {
+      console.error(`[send-bulk-media] pdf ${i} failed:`, e.message);
+      errors.push(`pdf${i}: ${e.message}`);
+    }
+  }
+
+  if (audio_voice_base64) {
+    try {
       const r = await s.sock.sendMessage(jid, { audio: b64ToBuffer(audio_voice_base64), mimetype: "audio/mp4", ptt: true });
       lastId = r.key.id;
+    } catch (e) {
+      console.error(`[send-bulk-media] audio failed:`, e.message);
+      errors.push(`audio: ${e.message}`);
     }
-
-    res.json({ success: true, messageId: lastId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
 
+  if (!lastId && errors.length) {
+    return res.status(500).json({ error: errors.join("; ") });
+  }
+  res.json({ success: true, messageId: lastId, partialErrors: errors.length ? errors : undefined });
+});
 // (repeat the same pattern for /connections/:connId/send-image and /connections/:connId/send-bulk-media,
 //  identical bodies to your current /send-image and /send-bulk-media, just reading req.params.connId
 //  and calling getSession(req.userId, req.params.connId) instead of getSession(req.userId))
