@@ -379,6 +379,7 @@ app.post("/connections/:connId/send", requireUser, async (req, res) => {
 });
 
 // ── Add these two routes to index.js, right after /connections/:connId/send ──
+// ── Add these two routes to index.js, right after /connections/:connId/send ──
 
 function b64ToBuffer(dataOrB64) {
   const clean = String(dataOrB64).includes(",") ? dataOrB64.split(",")[1] : dataOrB64;
