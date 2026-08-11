@@ -409,29 +409,33 @@ app.post("/connections/:connId/send-bulk-media", requireUser, async (req, res) =
   const { phone, text_message, photos_array = [], pdfs_array = [], audio_voice_base64 } = req.body;
   if (!phone) return res.status(400).json({ error: "phone_required" });
 
-  try {
+ try {
     resetIdleTimer(req.userId, req.params.connId);
     const jid = toJID(phone);
     let lastId = null;
+    let captionUsed = false;
 
-    if (text_message) {
-      const r = await s.sock.sendMessage(jid, { text: text_message });
-      lastId = r.key.id;
-      await sleep(800);
-    }
-    for (const photoSrc of photos_array) {
+    // Attach text_message as the CAPTION of the first photo (WhatsApp-native style)
+    // instead of sending it as a separate message before the image.
+    for (let i = 0; i < photos_array.length; i++) {
+      const photoSrc = photos_array[i];
       const buf = photoSrc.startsWith("http")
         ? Buffer.from((await (await fetch(photoSrc)).arrayBuffer()))
         : b64ToBuffer(photoSrc);
-      const r = await s.sock.sendMessage(jid, { image: buf });
+      const isFirst = i === 0;
+      const msg = { image: buf };
+      if (isFirst && text_message) {
+        msg.caption = text_message;
+        captionUsed = true;
+      }
+      const r = await s.sock.sendMessage(jid, msg);
       lastId = r.key.id;
       await sleep(800);
     }
-    for (const pdfSrc of pdfs_array) {
-      const buf = pdfSrc.startsWith("http")
-        ? Buffer.from((await (await fetch(pdfSrc)).arrayBuffer()))
-        : b64ToBuffer(pdfSrc);
-      const r = await s.sock.sendMessage(jid, { document: buf, mimetype: "application/pdf", fileName: "document.pdf" });
+
+    // Only send text as a standalone message if there was no photo to attach it to
+    if (text_message && !captionUsed) {
+      const r = await s.sock.sendMessage(jid, { text: text_message });
       lastId = r.key.id;
       await sleep(800);
     }
