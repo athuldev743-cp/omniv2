@@ -27,6 +27,12 @@ const PORT = process.env.PORT || 3001;
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_RECONNECTS = 5;
 
+// Max size we'll accept for a single media item before rejecting it outright.
+// WhatsApp's own document limit is ~100MB, but large payloads over slow
+// Render free-tier networking are a common source of silent timeouts —
+// keeping this conservative surfaces a clear error instead of a hang.
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024; // 16MB
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MIDDLEWARE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -383,7 +389,38 @@ app.post("/connections/:connId/send", requireUser, async (req, res) => {
 
 function b64ToBuffer(dataOrB64) {
   const clean = String(dataOrB64).includes(",") ? dataOrB64.split(",")[1] : dataOrB64;
-  return Buffer.from(clean, "base64");
+  const buf = Buffer.from(clean, "base64");
+  if (buf.length === 0) {
+    throw new Error("decoded_empty_buffer — source string was not valid base64/data-url");
+  }
+  return buf;
+}
+
+// Fetches a remote URL into a Buffer with an explicit timeout, so a slow/dead
+// host doesn't hang the whole campaign send silently.
+async function fetchToBuffer(url, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) {
+      throw new Error(`fetch_failed status=${resp.status} url=${url}`);
+    }
+    const arrBuf = await resp.arrayBuffer();
+    return Buffer.from(arrBuf);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveMediaBuffer(src) {
+  const buf = src.startsWith("http") ? await fetchToBuffer(src) : b64ToBuffer(src);
+  if (buf.length > MAX_MEDIA_BYTES) {
+    throw new Error(
+      `media_too_large size=${buf.length}bytes limit=${MAX_MEDIA_BYTES}bytes`
+    );
+  }
+  return buf;
 }
 
 app.post("/connections/:connId/send-image", requireUser, async (req, res) => {
@@ -393,12 +430,14 @@ app.post("/connections/:connId/send-image", requireUser, async (req, res) => {
   if (!phone || !image_base64) return res.status(400).json({ error: "phone_and_image_required" });
   try {
     resetIdleTimer(req.userId, req.params.connId);
+    const buf = await resolveMediaBuffer(image_base64);
     const result = await s.sock.sendMessage(toJID(phone), {
-      image: b64ToBuffer(image_base64),
+      image: buf,
       caption: caption || "",
     });
     res.json({ success: true, messageId: result.key.id });
   } catch (err) {
+    console.error(`[send-image] failed:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -415,19 +454,20 @@ app.post("/connections/:connId/send-bulk-media", requireUser, async (req, res) =
   let captionUsed = false;
   const errors = [];
 
-  console.log(`[send-bulk-media] photos=${photos_array.length} pdfs=${pdfs_array.length} hasAudio=${!!audio_voice_base64} hasText=${!!text_message}`);
+  console.log(
+    `[send-bulk-media] to=${phone} photos=${photos_array.length} pdfs=${pdfs_array.length} ` +
+    `hasAudio=${!!audio_voice_base64} hasText=${!!text_message}`
+  );
 
   for (let i = 0; i < photos_array.length; i++) {
     try {
-      const photoSrc = photos_array[i];
-      const buf = photoSrc.startsWith("http")
-        ? Buffer.from((await (await fetch(photoSrc)).arrayBuffer()))
-        : b64ToBuffer(photoSrc);
+      const buf = await resolveMediaBuffer(photos_array[i]);
       const isFirst = i === 0;
       const msg = { image: buf };
       if (isFirst && text_message) { msg.caption = text_message; captionUsed = true; }
       const r = await s.sock.sendMessage(jid, msg);
       lastId = r.key.id;
+      console.log(`[send-bulk-media] photo ${i} sent ok (${buf.length} bytes)`);
       await sleep(800);
     } catch (e) {
       console.error(`[send-bulk-media] photo ${i} failed:`, e.message);
@@ -448,12 +488,14 @@ app.post("/connections/:connId/send-bulk-media", requireUser, async (req, res) =
 
   for (let i = 0; i < pdfs_array.length; i++) {
     try {
-      const pdfSrc = pdfs_array[i];
-      const buf = pdfSrc.startsWith("http")
-        ? Buffer.from((await (await fetch(pdfSrc)).arrayBuffer()))
-        : b64ToBuffer(pdfSrc);
-      const r = await s.sock.sendMessage(jid, { document: buf, mimetype: "application/pdf", fileName: `document${i + 1}.pdf` });
+      const buf = await resolveMediaBuffer(pdfs_array[i]);
+      const r = await s.sock.sendMessage(jid, {
+        document: buf,
+        mimetype: "application/pdf",
+        fileName: `document${i + 1}.pdf`,
+      });
       lastId = r.key.id;
+      console.log(`[send-bulk-media] pdf ${i} sent ok (${buf.length} bytes)`);
       await sleep(800);
     } catch (e) {
       console.error(`[send-bulk-media] pdf ${i} failed:`, e.message);
@@ -463,7 +505,8 @@ app.post("/connections/:connId/send-bulk-media", requireUser, async (req, res) =
 
   if (audio_voice_base64) {
     try {
-      const r = await s.sock.sendMessage(jid, { audio: b64ToBuffer(audio_voice_base64), mimetype: "audio/mp4", ptt: true });
+      const buf = await resolveMediaBuffer(audio_voice_base64);
+      const r = await s.sock.sendMessage(jid, { audio: buf, mimetype: "audio/mp4", ptt: true });
       lastId = r.key.id;
     } catch (e) {
       console.error(`[send-bulk-media] audio failed:`, e.message);
@@ -493,4 +536,3 @@ app.listen(PORT, () => {
   console.log(`🚀 Multi-connection WA Bridge on port ${PORT}`);
   relaunchExistingSessions().catch(console.error);
 });
-
